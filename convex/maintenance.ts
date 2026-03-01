@@ -1534,6 +1534,10 @@ export const backfillDenormalizedBadgesInternal = internalMutation({
  * Backfill `latestVersionSummary` on all skills. Cursor-based paginated mutation
  * that self-schedules until done. Reads each skill's latestVersionId, extracts
  * the summary fields, and patches the skill.
+ *
+ * Always reconciles against the current `latestVersionId` — if the summary is
+ * stale (e.g. from a tag retarget), it will be rewritten. To force a full
+ * re-backfill, simply re-run the function; every row is re-evaluated.
  */
 export const backfillLatestVersionSummaryInternal = internalMutation({
   args: {
@@ -1548,20 +1552,30 @@ export const backfillLatestVersionSummaryInternal = internalMutation({
 
     let patched = 0
     for (const skill of page) {
-      if (skill.latestVersionSummary) continue
       if (!skill.latestVersionId) continue
       const version = await ctx.db.get(skill.latestVersionId)
       if (!version) continue
 
-      await ctx.db.patch(skill._id, {
-        latestVersionSummary: {
-          version: version.version,
-          createdAt: version.createdAt,
-          changelog: version.changelog,
-          changelogSource: version.changelogSource,
-          clawdis: version.parsed?.clawdis,
-        },
-      })
+      const expected = {
+        version: version.version,
+        createdAt: version.createdAt,
+        changelog: version.changelog,
+        changelogSource: version.changelogSource,
+        clawdis: version.parsed?.clawdis,
+      }
+
+      // Skip if already in sync
+      const existing = skill.latestVersionSummary
+      if (
+        existing &&
+        existing.version === expected.version &&
+        existing.createdAt === expected.createdAt &&
+        existing.changelog === expected.changelog
+      ) {
+        continue
+      }
+
+      await ctx.db.patch(skill._id, { latestVersionSummary: expected })
       patched++
     }
 

@@ -283,4 +283,6 @@ export const ClawdisSkillMetadataSchema = type({
     author: 'string?',
     links: SkillLinksSchema.optional(),
 });
+// If this line errors, ClawdisSkillMetadata is out of sync with ClawdisSkillMetadataSchema
+const _clawdisKeysCheck = true;
 //# sourceMappingURL=schemas.js.map

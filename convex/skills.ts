@@ -630,6 +630,7 @@ function toPublicSkillListVersionFromSummary(
   if (!latestVersionId) return null
   return {
     _id: latestVersionId,
+    // Approximates _creationTime; both are set to `now` in the same transaction
     _creationTime: summary.createdAt,
     version: summary.version,
     createdAt: summary.createdAt,
@@ -1807,7 +1808,9 @@ export const listPublicPageV2 = query({
     // Graceful backfill handling: during backfill, isSuspicious is undefined for
     // un-patched docs, which won't match eq('isSuspicious', false). If the indexed
     // query returns an unexpectedly empty first page, retry with the old path + JS filter.
-    if (useNonsuspiciousIndex && filteredPage.length === 0 && !result.isDone && !initialCursor) {
+    // Note: when the index has no matching rows, Convex returns isDone=true, so we
+    // intentionally omit the !result.isDone guard here to ensure the fallback fires.
+    if (useNonsuspiciousIndex && filteredPage.length === 0 && !initialCursor) {
       const fallbackPaginate = (cursor: string | null) =>
         ctx.db
           .query('skills')
@@ -2348,6 +2351,8 @@ export const getSkillsWithStaleModerationReasonInternal = internalQuery({
   handler: async (ctx, args) => {
     const limit = args.limit ?? 100
 
+    // Over-fetch from each bucket since some will be filtered out (no vtAnalysis).
+    const poolSize = limit * 2
     // Find skills with pending-like moderationReason using indexed queries
     const [vtPending, pendingScan] = await Promise.all([
       ctx.db
@@ -2355,13 +2360,13 @@ export const getSkillsWithStaleModerationReasonInternal = internalQuery({
         .withIndex('by_moderation', (q) =>
           q.eq('moderationStatus', 'active').eq('moderationReason', 'scanner.vt.pending'),
         )
-        .take(limit),
+        .take(poolSize),
       ctx.db
         .query('skills')
         .withIndex('by_moderation', (q) =>
           q.eq('moderationStatus', 'active').eq('moderationReason', 'pending.scan'),
         )
-        .take(limit),
+        .take(poolSize),
     ])
 
     const results: Array<{
@@ -3211,11 +3216,27 @@ export const updateTags = mutation({
 
     const latestEntry = args.tags.find((entry) => entry.tag === 'latest')
     const now = Date.now()
-    await ctx.db.patch(skill._id, {
+    const patch: Partial<Doc<'skills'>> = {
       tags: nextTags,
       latestVersionId: latestEntry ? latestEntry.versionId : skill.latestVersionId,
       updatedAt: now,
-    })
+    }
+
+    // Keep latestVersionSummary in sync when the latest tag is repointed
+    if (latestEntry && latestEntry.versionId !== skill.latestVersionId) {
+      const version = await ctx.db.get(latestEntry.versionId)
+      if (version) {
+        patch.latestVersionSummary = {
+          version: version.version,
+          createdAt: version.createdAt,
+          changelog: version.changelog,
+          changelogSource: version.changelogSource,
+          clawdis: version.parsed?.clawdis,
+        }
+      }
+    }
+
+    await ctx.db.patch(skill._id, patch)
 
     if (latestEntry) {
       await setSkillEmbeddingsLatestVersion(ctx, skill._id, latestEntry.versionId, now)
